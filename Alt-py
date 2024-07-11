@@ -17,6 +17,7 @@ class Connection:
 
     def __repr__(self):
         return f"Connection(source_id={self.source_id}, target_id={self.target_id})"
+
 def parse_alteryx_workflow(xml_file):
     tree = ET.parse(xml_file)
     root = tree.getroot()
@@ -24,8 +25,11 @@ def parse_alteryx_workflow(xml_file):
     tools = []
     connections = []
 
-    # Namespace handling (Alteryx XML files typically use namespaces)
-    ns = {'x': 'http://www.w3.org/1999/xhtml'}
+    # Extract namespace
+    ns = {'x': root.tag.split('}')[0].strip('{')}
+
+    # Debug: Print the root tag and namespace
+    print(f"Root tag: {root.tag}, Namespace: {ns['x']}")
 
     # Parse tools
     for tool_element in root.findall('.//x:Tool', ns):
@@ -34,11 +38,16 @@ def parse_alteryx_workflow(xml_file):
         tool_type = tool_element.get('ToolType')
         properties = {}
 
-        for prop in tool_element.find('.//x:Properties', ns):
-            properties[prop.tag] = prop.text
+        properties_element = tool_element.find('.//x:Properties', ns)
+        if properties_element is not None:
+            for prop in properties_element:
+                properties[prop.tag.split('}')[1]] = prop.text
 
         tool = Tool(id=tool_id, name=tool_name, tool_type=tool_type, properties=properties)
         tools.append(tool)
+
+    # Debug: Print parsed tools
+    print(f"Parsed tools: {tools}")
 
     # Parse connections
     for connection_element in root.findall('.//x:Connection', ns):
@@ -46,6 +55,9 @@ def parse_alteryx_workflow(xml_file):
         target_id = connection_element.get('TargetToolID')
         connection = Connection(source_id=source_id, target_id=target_id)
         connections.append(connection)
+
+    # Debug: Print parsed connections
+    print(f"Parsed connections: {connections}")
 
     return tools, connections
 
@@ -60,96 +72,4 @@ for tool in tools:
 print("\nConnections in the workflow:")
 for connection in connections:
     print(connection)
-import xml.etree.ElementTree as ET
 
-class Tool:
-    def __init__(self, id, name, tool_type, properties):
-        self.id = id
-        self.name = name
-        self.tool_type = tool_type
-        self.properties = properties
-
-    def __repr__(self):
-        return f"Tool(id={self.id}, name={self.name}, tool_type={self.tool_type})"
-
-class Connection:
-    def __init__(self, source_id, target_id):
-        self.source_id = source_id
-        self.target_id = target_id
-
-    def __repr__(self):
-        return f"Connection(source_id={self.source_id}, target_id={self.target_id})"
-
-def parse_alteryx_workflow(xml_file):
-    tree = ET.parse(xml_file)
-    root = tree.getroot()
-
-    tools = []
-    connections = []
-
-    # Namespace handling (Alteryx XML files typically use namespaces)
-    ns = {'x': 'http://www.w3.org/1999/xhtml'}
-
-    # Check all namespaces to find the correct one
-    for elem in root.iter():
-        if elem.tag.endswith('Tools'):
-            namespace = elem.tag.split('}')[0].strip('{')
-            ns = {'x': namespace}
-            break
-
-    # Parse tools
-    for tool_element in root.findall('.//x:Tool', ns):
-        tool_id = tool_element.get('ToolID')
-        tool_name = tool_element.get('Name')
-        tool_type = tool_element.get('ToolType')
-        properties = {}
-
-        for prop in tool_element.find('.//x:Properties', ns):
-            properties[prop.tag] = prop.text
-
-        tool = Tool(id=tool_id, name=tool_name, tool_type=tool_type, properties=properties)
-        tools.append(tool)
-
-    # Parse connections
-    for connection_element in root.findall('.//x:Connection', ns):
-        source_id = connection_element.get('SourceToolID')
-        target_id = connection_element.get('TargetToolID')
-        connection = Connection(source_id=source_id, target_id=target_id)
-        connections.append(connection)
-
-    return tools, connections
-
-# Example usage
-xml_file = 'path_to_your_alteryx_workflow.xml'
-tools, connections = parse_alteryx_workflow(xml_file)
-
-print("Tools in the workflow:")
-for tool in tools:
-    print(tool)
-
-print("\nConnections in the workflow:")
-for connection in connections:
-    print(connection)
-# Parse tools with debugging outputs
-print("Debug: Parsing tools")
-for tool_element in root.findall('.//x:Tool', ns):
-    print(f"Debug: Found tool element: {ET.tostring(tool_element, encoding='unicode')}")
-    tool_id = tool_element.get('ToolID')
-    tool_name = tool_element.get('Name')
-    tool_type = tool_element.get('ToolType')
-    properties = {}
-
-    for prop in tool_element.find('.//x:Properties', ns):
-        properties[prop.tag] = prop.text
-
-    tool = Tool(id=tool_id, name=tool_name, tool_type=tool_type, properties=properties)
-    tools.append(tool)
-
-# Parse connections with debugging outputs
-print("Debug: Parsing connections")
-for connection_element in root.findall('.//x:Connection', ns):
-    print(f"Debug: Found connection element: {ET.tostring(connection_element, encoding='unicode')}")
-    source_id = connection_element.get('SourceToolID')
-    target_id = connection_element.get('TargetToolID')
-    connection = Connection(source_id=source_id, target_id=target_id)
-    connections.append(connection)
