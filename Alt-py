@@ -1,0 +1,63 @@
+import xml.etree.ElementTree as ET
+
+class Tool:
+    def __init__(self, id, name, tool_type, properties):
+        self.id = id
+        self.name = name
+        self.tool_type = tool_type
+        self.properties = properties
+
+    def __repr__(self):
+        return f"Tool(id={self.id}, name={self.name}, tool_type={self.tool_type})"
+
+class Connection:
+    def __init__(self, source_id, target_id):
+        self.source_id = source_id
+        self.target_id = target_id
+
+    def __repr__(self):
+        return f"Connection(source_id={self.source_id}, target_id={self.target_id})"
+
+def parse_alteryx_workflow(xml_file):
+    tree = ET.parse(xml_file)
+    root = tree.getroot()
+
+    tools = []
+    connections = []
+
+    # Namespace handling (Alteryx XML files typically use namespaces)
+    ns = {'x': 'http://www.w3.org/1999/xhtml'}
+
+    # Parse tools
+    for tool_element in root.findall('.//x:Tool', ns):
+        tool_id = tool_element.get('ToolID')
+        tool_name = tool_element.get('Name')
+        tool_type = tool_element.get('ToolType')
+        properties = {}
+
+        for prop in tool_element.find('.//x:Properties', ns):
+            properties[prop.tag] = prop.text
+
+        tool = Tool(id=tool_id, name=tool_name, tool_type=tool_type, properties=properties)
+        tools.append(tool)
+
+    # Parse connections
+    for connection_element in root.findall('.//x:Connection', ns):
+        source_id = connection_element.get('SourceToolID')
+        target_id = connection_element.get('TargetToolID')
+        connection = Connection(source_id=source_id, target_id=target_id)
+        connections.append(connection)
+
+    return tools, connections
+
+# Example usage
+xml_file = 'path_to_your_alteryx_workflow.xml'
+tools, connections = parse_alteryx_workflow(xml_file)
+
+print("Tools in the workflow:")
+for tool in tools:
+    print(tool)
+
+print("\nConnections in the workflow:")
+for connection in connections:
+    print(connection)
