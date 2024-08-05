@@ -245,4 +245,123 @@ def create_procedure(conn):
                         if relatedClientOrderID:
                             result = cursor.execute(f"""
                             SELECT RelatedClientOrder_ID
-                            FROM TrRaw
+                            FROM TrRawHeader
+                            WHERE ClientOrder_ID = {relatedClientOrderID}
+                            """).fetchone()
+                            if result:
+                                keyID = result[0]
+
+                        if not keyID:
+                            result = cursor.execute(f"""
+                            SELECT dd.ClientOrder_ID
+                            FROM TrRawDetail d
+                            JOIN TrRawDetail dd ON d.RelatedOrderDetail_ID = dd.OrderDetail_ID
+                            WHERE d.OrderDetail_ID = {orderDetailID}
+                            """).fetchone()
+                            if result:
+                                keyID = result[0]
+
+                        if keyID:
+                            result = cursor.execute(f"""
+                            SELECT TOP 1 ar.ActualPaymentMethod_ID
+                            FROM ARTransaction ar
+                            WHERE ar.Key_ID = {keyID}
+                                AND ar.KeyType = {keyType}
+                                AND ar.Type_ID <> 11
+                                AND ar.ARBalanceDue_SC = 0
+                                AND ar.ActualPaymentMethod_ID IS NOT NULL
+                            ORDER BY ar.LastUpdate_Date DESC
+                            """).fetchone()
+                            if result:
+                                settlementMethodID = result[0]
+
+                    if orderTypeID in (1, 13) or (orderTypeID == 4 and isAggregation):
+                        cursor.execute(f"""
+                        UPDATE #items
+                        SET ARPostDate = '{postDate}', SettlementMethod_ID = {settlementMethodID}
+                        WHERE ClientOrder_ID = {clientOrderID}
+                        """)
+                    else:
+                        cursor.execute(f"""
+                        UPDATE #items
+                        SET ARPostDate = '{postDate}', SettlementMethod_ID = {settlementMethodID}
+                        WHERE OrderDetail_ID = {orderDetailID}
+                        """)
+
+                    if orderTypeID in (1, 13) or (orderTypeID == 4 and isAggregation):
+                        cursor.execute(f"DELETE FROM #cursor WHERE ClientOrder_ID = {clientOrderID}")
+                    else:
+                        cursor.execute(f"DELETE FROM #cursor WHERE OrderDetail_ID = {orderDetailID}")
+
+                    result = cursor.execute("SELECT TOP 1 ClientOrder_ID, OrderDetail_ID, RelatedClientOrder_ID, RelatedOrderDetail_ID, OrderType_ID, Ordered, IsAggregation FROM #cursor").fetchone()
+                    if not result:
+                        break
+
+                    clientOrderID, orderDetailID, relatedClientOrderID, relatedOrderDetailID, orderTypeID, ordered, isAggregation = result
+
+                cursor.execute("""
+                UPDATE #items
+                SET SettlementMethod = p.Code
+                FROM PickListItem p
+                WHERE #items.SettlementMethod_ID = p.PickListItem_ID
+                """)
+
+                result = cursor.execute("""
+                SELECT 
+                    ClientOrder_ID,
+                    OrderDetail_ID,
+                    RelatedClientOrder_ID,
+                    RelatedOrderDetail_ID,
+                    OrderType_ID,
+                    Account,
+                    ConfirmationNo,
+                    ItemNo,
+                    Ordered,
+                    ARPostDate,
+                    SettlementMethod_ID,
+                    SettlementMethod,
+                    SettlementAmount,
+                    ItemType_ID,
+                    ItemTypeDescription,
+                    SendDate,
+                    ValueDate,
+                    ClearDate,
+                    CurrencyCode,
+                    ForeignAmount,
+                    FundedBy,
+                    FundedByDescription
+                FROM #items
+                ORDER BY Ordered
+                """).fetchall()
+
+                return str(result)
+            except ProgrammingError as e:
+                return 'ProgrammingError: ' + str(e)
+            except Exception as e:
+                return 'Error: ' + str(e)
+            finally:
+                cursor.close()
+                conn.close()
+
+        return run_procedure(ProcessCenter_ID, DaysCleared, Office_ID)
+        $$;
+        """
+        conn.cursor().execute(sql_command)
+        print("Procedure created successfully.")
+    except Exception as e:
+        print(f"Error creating procedure: {e}")
+
+# Call the create_procedure function to create the procedure in Snowflake
+create_procedure(conn)
+
+# Execute the procedure
+try:
+    cur = conn.cursor()
+    cur.execute("CALL SP_PSD(1, 30, NULL)")
+    for (col1,) in cur:
+        print(col1)
+except Exception as e:
+    print(f"Error executing procedure: {e}")
+finally:
+    cur.close()
+    conn.close()
