@@ -1,337 +1,195 @@
 CREATE OR REPLACE PROCEDURE SP_PSD(
-    ProcessCenter_ID INT,
-    DaysCleared INT,
-    Office_ID INT = NULL
+    ProcessCenter_ID NUMBER,
+    DaysCleared NUMBER,
+    Office_ID NUMBER = NULL
 )
 RETURNS STRING
 LANGUAGE JAVASCRIPT
 EXECUTE AS CALLER
 AS
 $$
-var clientOrderID, orderDetailID, relatedClientOrderID, relatedOrderDetailID, orderTypeID, keyID, keyType, settlementMethodID, isAggregation, officeIDMalta = 60, opsStatusListDeleted = 813;
+var clientOrderID, orderDetailID, relatedClientOrderID, relatedOrderDetailID, orderTypeID, keyID, keyType, settlementMethodID, isAggregation;
+var officeIDMalta = 60;
+var opsStatusListDeleted = 813;
 var postDate, ordered;
 var sql_command;
 
 try {
     // Drop temp tables if they exist
-    sql_command = `DROP TABLE IF EXISTS #cursor`;
-    snowflake.execute({sqlText: sql_command});
+    try {
+        sql_command = `DROP TABLE IF EXISTS #cursor`;
+        snowflake.execute({sqlText: sql_command});
+    } catch (err) {
+        throw new Error('Error dropping #cursor table: ' + err.message);
+    }
 
-    sql_command = `DROP TABLE IF EXISTS #items`;
-    snowflake.execute({sqlText: sql_command});
+    try {
+        sql_command = `DROP TABLE IF EXISTS #items`;
+        snowflake.execute({sqlText: sql_command});
+    } catch (err) {
+        throw new Error('Error dropping #items table: ' + err.message);
+    }
 
     // Create temp tables
-    sql_command = `CREATE TEMPORARY TABLE #cursor (
-        ClientOrder_ID INT,
-        OrderDetail_ID INT,
-        RelatedClientOrder_ID INT,
-        RelatedOrderDetail_ID INT,
-        OrderType_ID INT,
-        Ordered TIMESTAMP_NTZ,
-        IsAggregation BOOLEAN
-    )`;
-    snowflake.execute({sqlText: sql_command});
+    try {
+        sql_command = `CREATE TEMPORARY TABLE #cursor (
+            ClientOrder_ID NUMBER,
+            OrderDetail_ID NUMBER,
+            RelatedClientOrder_ID NUMBER,
+            RelatedOrderDetail_ID NUMBER,
+            OrderType_ID NUMBER,
+            Ordered TIMESTAMP_NTZ,
+            IsAggregation BOOLEAN
+        )`;
+        snowflake.execute({sqlText: sql_command});
+    } catch (err) {
+        throw new Error('Error creating #cursor table: ' + err.message);
+    }
 
-    sql_command = `CREATE TEMPORARY TABLE #items (
-        ClientOrder_ID INT,
-        OrderDetail_ID INT,
-        RelatedClientOrder_ID INT,
-        RelatedOrderDetail_ID INT,
-        OrderType_ID INT,
-        Account STRING,
-        ConfirmationNo STRING,
-        ItemNo INT,
-        Ordered TIMESTAMP_NTZ,
-        ARPostDate TIMESTAMP_NTZ,
-        SettlementMethod_ID INT,
-        SettlementMethod STRING,
-        SettlementCurrencyCode STRING,
-        SettlementAmount FLOAT,
-        ItemType_ID INT,
-        ItemTypeDescription STRING,
-        SendDate TIMESTAMP_NTZ,
-        ValueDate TIMESTAMP_NTZ,
-        ClearDate TIMESTAMP_NTZ,
-        CurrencyCode STRING,
-        ForeignAmount FLOAT,
-        FundedBy INT,
-        FundedByDescription STRING,
-        IsAggregation BOOLEAN,
-        OurCheckRef STRING
-    )`;
-    snowflake.execute({sqlText: sql_command});
+    try {
+        sql_command = `CREATE TEMPORARY TABLE #items (
+            ClientOrder_ID NUMBER,
+            OrderDetail_ID NUMBER,
+            RelatedClientOrder_ID NUMBER,
+            RelatedOrderDetail_ID NUMBER,
+            OrderType_ID NUMBER,
+            Account STRING,
+            ConfirmationNo STRING,
+            ItemNo NUMBER,
+            Ordered TIMESTAMP_NTZ,
+            ARPostDate TIMESTAMP_NTZ,
+            SettlementMethod_ID NUMBER,
+            SettlementMethod STRING,
+            SettlementCurrencyCode STRING,
+            SettlementAmount FLOAT,
+            ItemType_ID NUMBER,
+            ItemTypeDescription STRING,
+            SendDate TIMESTAMP_NTZ,
+            ValueDate TIMESTAMP_NTZ,
+            ClearDate TIMESTAMP_NTZ,
+            CurrencyCode STRING,
+            ForeignAmount FLOAT,
+            FundedBy NUMBER,
+            FundedByDescription STRING,
+            IsAggregation BOOLEAN,
+            OurCheckRef STRING
+        )`;
+        snowflake.execute({sqlText: sql_command});
+    } catch (err) {
+        throw new Error('Error creating #items table: ' + err.message);
+    }
 
     // Insert data into #items
-    sql_command = `
-    INSERT INTO #items
-    SELECT 
-        h.ClientOrder_ID,
-        d.OrderDetail_ID,
-        h.RelatedClientOrder_ID,
-        d.RelatedOrderDetail_ID,
-        h.OrderType_ID,
-        c.Account,
-        h.ConfirmationNo,
-        d.ItemNo,
-        h.Ordered,
-        NULL, -- ARPostDate
-        NULL, -- SettlementMethod_ID
-        NULL, -- SettlementMethod
-        h.Settlement_SWIFT, -- SettlementCurrencyCode
-        d.Extension, -- SettlementAmount
-        d.ItemType_ID,
-        d.ItemTypeDescription,
-        COALESCE(CASE o.status_id WHEN 776 THEN o.StatusUpdated ELSE NULL END,
-                 CASE oa.status_id WHEN 776 THEN oa.StatusUpdated ELSE NULL END), -- SendDate
-        COALESCE(o.ValueDate, oa.ValueDate),
-        r.ClearDate,
-        d.CurrencyCode,
-        d.ForeignAmount,
-        d.FundedBy,
-        REPLACE(p.Description, 'Payment Funded By - ', ''),
-        NVL(ex.IsAggregation, FALSE),
-        d.OurCheckRef
-    FROM 
-        client c 
-        JOIN TrRawHeader h ON c.Client_ID = h.Client_ID
-        JOIN TrRawDetail d ON h.ClientOrder_ID = d.ClientOrder_ID
-        LEFT JOIN ClientOrder_Extended_History ex ON h.ClientOrder_ID = ex.ClientOrder_ID
-        LEFT JOIN Reconciliation_History r ON d.OrderDetail_ID = r.OrderDetail_ID
-        LEFT JOIN OpsLog o ON d.OrderDetail_ID = o.OrderDetail_ID
-        LEFT JOIN OpsLog_Archive oa ON d.OrderDetail_ID = oa.OrderDetail_ID
-        LEFT JOIN PickListItem p ON d.FundedBy = p.PickListItem_ID
-    WHERE 
-        c.ProcessCenter_ID = :1
-        AND c.Office_ID = COALESCE(NULLIF(:2, -1), c.Office_ID)
-        AND h.OrderType_ID IN (1, 4, 9, 13, 103)
-        AND d.ItemType_ID <> 117
-        AND (c.Office_ID != 13 OR d.ItemType_ID != 3)
-        AND NOT (d.Extension = 0 AND d.ForeignAmount = 0)
-        AND c.Status_ID IN (3, 4)
-        AND COALESCE(r.ClearDate, CURRENT_TIMESTAMP) > DATEADD(day, -:3, CURRENT_TIMESTAMP)
-        AND (
-            (c.Office_ID = :4 AND YEAR(h.Ordered) IN (YEAR(CURRENT_DATE), YEAR(CURRENT_DATE) - 1, YEAR(CURRENT_DATE) - 2))
-            OR
-            (c.Office_ID != :4 AND YEAR(h.Ordered) IN (YEAR(CURRENT_DATE), YEAR(CURRENT_DATE) - 1))
-        )
-    `;
-    snowflake.execute({
-        sqlText: sql_command, 
-        binds: [ProcessCenter_ID, Office_ID, DaysCleared, officeIDMalta]
-    });
+    try {
+        sql_command = `
+        INSERT INTO #items
+        SELECT 
+            h.ClientOrder_ID,
+            d.OrderDetail_ID,
+            h.RelatedClientOrder_ID,
+            d.RelatedOrderDetail_ID,
+            h.OrderType_ID,
+            c.Account,
+            h.ConfirmationNo,
+            d.ItemNo,
+            h.Ordered,
+            NULL, -- ARPostDate
+            NULL, -- SettlementMethod_ID
+            NULL, -- SettlementMethod
+            h.Settlement_SWIFT, -- SettlementCurrencyCode
+            d.Extension, -- SettlementAmount
+            d.ItemType_ID,
+            d.ItemTypeDescription,
+            COALESCE(CASE o.status_id WHEN 776 THEN o.StatusUpdated ELSE NULL END,
+                     CASE oa.status_id WHEN 776 THEN oa.StatusUpdated ELSE NULL END), -- SendDate
+            COALESCE(o.ValueDate, oa.ValueDate),
+            r.ClearDate,
+            d.CurrencyCode,
+            d.ForeignAmount,
+            d.FundedBy,
+            REPLACE(p.Description, 'Payment Funded By - ', ''),
+            NVL(ex.IsAggregation, FALSE),
+            d.OurCheckRef
+        FROM 
+            client c 
+            JOIN TrRawHeader h ON c.Client_ID = h.Client_ID
+            JOIN TrRawDetail d ON h.ClientOrder_ID = d.ClientOrder_ID
+            LEFT JOIN ClientOrder_Extended_History ex ON h.ClientOrder_ID = ex.ClientOrder_ID
+            LEFT JOIN Reconciliation_History r ON d.OrderDetail_ID = r.OrderDetail_ID
+            LEFT JOIN OpsLog o ON d.OrderDetail_ID = o.OrderDetail_ID
+            LEFT JOIN OpsLog_Archive oa ON d.OrderDetail_ID = oa.OrderDetail_ID
+            LEFT JOIN PickListItem p ON d.FundedBy = p.PickListItem_ID
+        WHERE 
+            c.ProcessCenter_ID = :1
+            AND c.Office_ID = COALESCE(NULLIF(:2, -1), c.Office_ID)
+            AND h.OrderType_ID IN (1, 4, 9, 13, 103)
+            AND d.ItemType_ID <> 117
+            AND (c.Office_ID != 13 OR d.ItemType_ID != 3)
+            AND NOT (d.Extension = 0 AND d.ForeignAmount = 0)
+            AND c.Status_ID IN (3, 4)
+            AND COALESCE(r.ClearDate, CURRENT_TIMESTAMP) > DATEADD(day, -:3, CURRENT_TIMESTAMP)
+            AND (
+                (c.Office_ID = :4 AND YEAR(h.Ordered) IN (YEAR(CURRENT_DATE), YEAR(CURRENT_DATE) - 1, YEAR(CURRENT_DATE) - 2))
+                OR
+                (c.Office_ID != :4 AND YEAR(h.Ordered) IN (YEAR(CURRENT_DATE), YEAR(CURRENT_DATE) - 1))
+            )
+        `;
+        snowflake.execute({
+            sqlText: sql_command,
+            binds: [ProcessCenter_ID, Office_ID, DaysCleared, officeIDMalta]
+        });
+    } catch (err) {
+        throw new Error('Error inserting into #items with binding arguments: ' + err.message);
+    }
 
     // Delete invalid records from #items
-    sql_command = `DELETE FROM #items WHERE ClientOrder_ID IN (SELECT PreviousClientOrder_ID FROM RSRepurchase)`;
-    snowflake.execute({sqlText: sql_command});
+    try {
+        sql_command = `DELETE FROM #items WHERE ClientOrder_ID IN (SELECT PreviousClientOrder_ID FROM RSRepurchase)`;
+        snowflake.execute({sqlText: sql_command});
+    } catch (err) {
+        throw new Error('Error deleting RSRepurchase records from #items: ' + err.message);
+    }
 
-    sql_command = `DELETE FROM #items WHERE OurCheckRef = 'No new EFT'`;
-    snowflake.execute({sqlText: sql_command});
+    try {
+        sql_command = `DELETE FROM #items WHERE OurCheckRef = 'No new EFT'`;
+        snowflake.execute({sqlText: sql_command});
+    } catch (err) {
+        throw new Error('Error deleting "No new EFT" records from #items: ' + err.message);
+    }
 
-    sql_command = `DELETE FROM #items WHERE OrderDetail_ID IN (SELECT OrderDetail_ID FROM OpsLog_Archive WHERE Status_ID = :1)`;
-    snowflake.execute({sqlText: sql_command, binds: [opsStatusListDeleted]});
+    try {
+        sql_command = `DELETE FROM #items WHERE OrderDetail_ID IN (SELECT OrderDetail_ID FROM OpsLog_Archive WHERE Status_ID = :1)`;
+        snowflake.execute({sqlText: sql_command, binds: [opsStatusListDeleted]});
+    } catch (err) {
+        throw new Error('Error deleting OpsLog_Archive records from #items with binding argument: ' + err.message);
+    }
 
     // Insert into #cursor
-    sql_command = `
-    INSERT INTO #cursor
-    SELECT
-        ClientOrder_ID,
-        OrderDetail_ID,
-        RelatedClientOrder_ID, 
-        RelatedOrderDetail_ID,
-        OrderType_ID,
-        Ordered,
-        IsAggregation
-    FROM #items i
-    WHERE EXISTS (
-        SELECT 1
-        FROM ARTransaction AS AR
-        WHERE AR.ClientOrder_ID IN (i.ClientOrder_ID, i.RelatedClientOrder_ID)
-    )
-    `;
-    snowflake.execute({sqlText: sql_command});
+    try {
+        sql_command = `
+        INSERT INTO #cursor
+        SELECT
+            ClientOrder_ID,
+            OrderDetail_ID,
+            RelatedClientOrder_ID, 
+            RelatedOrderDetail_ID,
+            OrderType_ID,
+            Ordered,
+            IsAggregation
+        FROM #items i
+        WHERE EXISTS (
+            SELECT 1
+            FROM ARTransaction AS AR
+            WHERE AR.ClientOrder_ID IN (i.ClientOrder_ID, i.RelatedClientOrder_ID)
+        )
+        `;
+        snowflake.execute({sqlText: sql_command});
+    } catch (err) {
+        throw new Error('Error inserting into #cursor: ' + err.message);
+    }
 
     // Fetch the first row
-    sql_command = `
-    SELECT TOP 1
-        ClientOrder_ID,
-        OrderDetail_ID,
-        RelatedClientOrder_ID,
-        RelatedOrderDetail_ID,
-        OrderType_ID,
-        Ordered,
-        IsAggregation
-    FROM #cursor
-    `;
-    var result = snowflake.execute({sqlText: sql_command}).next();
-    clientOrderID = result.CLIENTORDER_ID;
-    orderDetailID = result.ORDERDETAIL_ID;
-    relatedClientOrderID = result.RELATEDCLIENTORDER_ID;
-    relatedOrderDetailID = result.RELATEDORDERDETAIL_ID;
-    orderTypeID = result.ORDERTYPE_ID;
-    ordered = result.ORDERED;
-    isAggregation = result.ISAGGREGATION;
-
-    // Process rows
-    while (result) {
-        keyID = null;
-        keyType = null;
-
-        if (orderTypeID == 1 || orderTypeID == 13 || (orderTypeID == 4 && isAggregation)) {
-            keyID = clientOrderID;
-            keyType = 0;
-        } else if (orderTypeID == 9) {
-            keyID = relatedOrderDetailID;
-            keyType = 1;
-        } else {
-            keyID = orderDetailID;
-            keyType = 1;
-        }
-
-        postDate = null;
-        settlementMethodID = null;
-
-        if (orderTypeID == 9) {
-            sql_command = `
-            SELECT TOP 1
-                ar.LastUpdate_Date,
-                ar.ActualPaymentMethod_ID
-            FROM ARTransaction ar
-            WHERE ar.Key_ID = :1
-                AND ar.KeyType = :2
-                AND ar.Type_ID <> 11
-                AND ar.ARBalanceDue_SC = 0
-                AND ar.LastUpdate_Date < :3
-            ORDER BY ar.LastUpdate_Date DESC
-            `;
-            result = snowflake.execute({sqlText: sql_command, binds: [keyID, keyType, ordered]}).next();
-            postDate = result.LASTUPDATE_DATE;
-            settlementMethodID = result.ACTUALPAYMENTMETHOD_ID;
-        } else {
-            sql_command = `
-            SELECT TOP 1
-                ar.LastUpdate_Date,
-                ar.ActualPaymentMethod_ID
-            FROM ARTransaction ar
-            WHERE ar.Key_ID = :1
-                AND ar.KeyType = :2
-                AND ar.Type_ID <> 11
-                AND ar.ARBalanceDue_SC = 0
-            ORDER BY ar.LastUpdate_Date DESC
-            `;
-            result = snowflake.execute({sqlText: sql_command, binds: [keyID, keyType]}).next();
-            postDate = result.LASTUPDATE_DATE;
-            settlementMethodID = result.ACTUALPAYMENTMETHOD_ID;
-        }
-
-        if (!settlementMethodID && result) {
-            if (orderTypeID == 9) {
-                sql_command = `
-                SELECT TOP 1
-                    ar.ActualPaymentMethod_ID
-                FROM ARTransaction ar
-                WHERE ar.Key_ID = :1
-                    AND ar.KeyType = :2
-                    AND ar.Type_ID <> 11
-                    AND ar.ARBalanceDue_SC = 0
-                    AND ar.ActualPaymentMethod_ID IS NOT NULL
-                    AND ar.LastUpdate_Date < :3
-                ORDER BY ar.LastUpdate_Date DESC
-                `;
-                result = snowflake.execute({sqlText: sql_command, binds: [keyID, keyType, ordered]}).next();
-                settlementMethodID = result.ACTUALPAYMENTMETHOD_ID;
-            } else {
-                sql_command = `
-                SELECT TOP 1
-                    ar.ActualPaymentMethod_ID
-                FROM ARTransaction ar
-                WHERE ar.Key_ID = :1
-                    AND ar.KeyType = :2
-                    AND ar.Type_ID <> 11
-                    AND ar.ARBalanceDue_SC = 0
-                    AND ar.ActualPaymentMethod_ID IS NOT NULL
-                ORDER BY ar.LastUpdate_Date DESC
-                `;
-                result = snowflake.execute({sqlText: sql_command, binds: [keyID, keyType]}).next();
-                settlementMethodID = result.ACTUALPAYMENTMETHOD_ID;
-            }
-        }
-
-        if (!settlementMethodID && (orderTypeID == 1 || orderTypeID == 13)) {
-            keyID = null;
-
-            if (relatedClientOrderID) {
-                sql_command = `
-                SELECT RelatedClientOrder_ID
-                FROM TrRawHeader
-                WHERE ClientOrder_ID = :1
-                `;
-                result = snowflake.execute({sqlText: sql_command, binds: [relatedClientOrderID]}).next();
-                keyID = result.RELATEDCLIENTORDER_ID;
-            }
-
-            if (!keyID) {
-                sql_command = `
-                SELECT dd.ClientOrder_ID
-                FROM TrRawDetail d
-                JOIN TrRawDetail dd ON d.RelatedOrderDetail_ID = dd.OrderDetail_ID
-                WHERE d.OrderDetail_ID = :1
-                `;
-                result = snowflake.execute({sqlText: sql_command, binds: [orderDetailID]}).next();
-                keyID = result.CLIENTORDER_ID;
-            }
-
-            if (keyID) {
-                sql_command = `
-                SELECT TOP 1
-                    ar.ActualPaymentMethod_ID
-                FROM ARTransaction ar
-                WHERE ar.Key_ID = :1
-                    AND ar.KeyType = :2
-                    AND ar.Type_ID <> 11
-                    AND ar.ARBalanceDue_SC = 0
-                    AND ar.ActualPaymentMethod_ID IS NOT NULL
-                ORDER BY ar.LastUpdate_Date DESC
-                `;
-                result = snowflake.execute({sqlText: sql_command, binds: [keyID, keyType]}).next();
-                settlementMethodID = result.ACTUALPAYMENTMETHOD_ID;
-            }
-        }
-
-        if (orderTypeID == 1 || orderTypeID == 13 || (orderTypeID == 4 && isAggregation)) {
-            sql_command = `
-            UPDATE #items
-            SET
-                ARPostDate = :1,
-                SettlementMethod_ID = :2
-            WHERE ClientOrder_ID = :3
-            `;
-            snowflake.execute({sqlText: sql_command, binds: [postDate, settlementMethodID, clientOrderID]});
-        } else {
-            sql_command = `
-            UPDATE #items
-            SET
-                ARPostDate = :1,
-                SettlementMethod_ID = :2
-            WHERE OrderDetail_ID = :3
-            `;
-            snowflake.execute({sqlText: sql_command, binds: [postDate, settlementMethodID, orderDetailID]});
-        }
-
-        if (orderTypeID == 1 || orderTypeID == 13 || (orderTypeID == 4 && isAggregation)) {
-            sql_command = `
-            DELETE FROM #cursor
-            WHERE ClientOrder_ID = :1
-            `;
-            snowflake.execute({sqlText: sql_command, binds: [clientOrderID]});
-        } else {
-            sql_command = `
-            DELETE FROM #cursor
-            WHERE OrderDetail_ID = :1
-            `;
-            snowflake.execute({sqlText: sql_command, binds: [orderDetailID]});
-        }
-
-        // Fetch the next row
+    try {
         sql_command = `
         SELECT TOP 1
             ClientOrder_ID,
@@ -343,12 +201,7 @@ try {
             IsAggregation
         FROM #cursor
         `;
-        result = snowflake.execute({sqlText: sql_command}).next();
-
-        if (!result) {
-            break;
-        }
-
+        var result = snowflake.execute({sqlText: sql_command}).next();
         clientOrderID = result.CLIENTORDER_ID;
         orderDetailID = result.ORDERDETAIL_ID;
         relatedClientOrderID = result.RELATEDCLIENTORDER_ID;
@@ -356,50 +209,270 @@ try {
         orderTypeID = result.ORDERTYPE_ID;
         ordered = result.ORDERED;
         isAggregation = result.ISAGGREGATION;
+    } catch (err) {
+        throw new Error('Error fetching first row from #cursor: ' + err.message);
+    }
+
+    // Process rows
+    while (result) {
+        try {
+            keyID = null;
+            keyType = null;
+
+            if (orderTypeID == 1 || orderTypeID == 13 || (orderTypeID == 4 && isAggregation)) {
+                keyID = clientOrderID;
+                keyType = 0;
+            } else if (orderTypeID == 9) {
+                keyID = relatedOrderDetailID;
+                keyType = 1;
+            } else {
+                keyID = orderDetailID;
+                keyType = 1;
+            }
+
+            postDate = null;
+            settlementMethodID = null;
+
+            try {
+                if (orderTypeID == 9) {
+                    sql_command = `
+                    SELECT TOP 1
+                        ar.LastUpdate_Date,
+                        ar.ActualPaymentMethod_ID
+                    FROM ARTransaction ar
+                    WHERE ar.Key_ID = :1
+                        AND ar.KeyType = :2
+                        AND ar.Type_ID <> 11
+                        AND ar.ARBalanceDue_SC = 0
+                        AND ar.LastUpdate_Date < :3
+                    ORDER BY ar.LastUpdate_Date DESC
+                    `;
+                    result = snowflake.execute({sqlText: sql_command, binds: [keyID, keyType, ordered]}).next();
+                } else {
+                    sql_command = `
+                    SELECT TOP 1
+                        ar.LastUpdate_Date,
+                        ar.ActualPaymentMethod_ID
+                    FROM ARTransaction ar
+                    WHERE ar.Key_ID = :1
+                        AND ar.KeyType = :2
+                        AND ar.Type_ID <> 11
+                        AND ar.ARBalanceDue_SC = 0
+                    ORDER BY ar.LastUpdate_Date DESC
+                    `;
+                    result = snowflake.execute({sqlText: sql_command, binds: [keyID, keyType]}).next();
+                }
+                postDate = result.LASTUPDATE_DATE;
+                settlementMethodID = result.ACTUALPAYMENTMETHOD_ID;
+            } catch (err) {
+                throw new Error('Error fetching ARTransaction data with binding arguments: ' + err.message);
+            }
+
+            if (!settlementMethodID && result) {
+                try {
+                    if (orderTypeID == 9) {
+                        sql_command = `
+                        SELECT TOP 1
+                            ar.ActualPaymentMethod_ID
+                        FROM ARTransaction ar
+                        WHERE ar.Key_ID = :1
+                            AND ar.KeyType = :2
+                            AND ar.Type_ID <> 11
+                            AND ar.ARBalanceDue_SC = 0
+                            AND ar.ActualPaymentMethod_ID IS NOT NULL
+                            AND ar.LastUpdate_Date < :3
+                        ORDER BY ar.LastUpdate_Date DESC
+                        `;
+                        result = snowflake.execute({sqlText: sql_command, binds: [keyID, keyType, ordered]}).next();
+                    } else {
+                        sql_command = `
+                        SELECT TOP 1
+                            ar.ActualPaymentMethod_ID
+                        FROM ARTransaction ar
+                        WHERE ar.Key_ID = :1
+                            AND ar.KeyType = :2
+                            AND ar.Type_ID <> 11
+                            AND ar.ARBalanceDue_SC = 0
+                            AND ar.ActualPaymentMethod_ID IS NOT NULL
+                        ORDER BY ar.LastUpdate_Date DESC
+                        `;
+                        result = snowflake.execute({sqlText: sql_command, binds: [keyID, keyType]}).next();
+                    }
+                    settlementMethodID = result.ACTUALPAYMENTMETHOD_ID;
+                } catch (err) {
+                    throw new Error('Error fetching fallback ARTransaction data with binding arguments: ' + err.message);
+                }
+            }
+
+            if (!settlementMethodID && (orderTypeID == 1 || orderTypeID == 13)) {
+                keyID = null;
+
+                try {
+                    if (relatedClientOrderID) {
+                        sql_command = `
+                        SELECT RelatedClientOrder_ID
+                        FROM TrRawHeader
+                        WHERE ClientOrder_ID = :1
+                        `;
+                        result = snowflake.execute({sqlText: sql_command, binds: [relatedClientOrderID]}).next();
+                        keyID = result.RELATEDCLIENTORDER_ID;
+                    }
+
+                    if (!keyID) {
+                        sql_command = `
+                        SELECT dd.ClientOrder_ID
+                        FROM TrRawDetail d
+                        JOIN TrRawDetail dd ON d.RelatedOrderDetail_ID = dd.OrderDetail_ID
+                        WHERE d.OrderDetail_ID = :1
+                        `;
+                        result = snowflake.execute({sqlText: sql_command, binds: [orderDetailID]}).next();
+                        keyID = result.CLIENTORDER_ID;
+                    }
+
+                    if (keyID) {
+                        sql_command = `
+                        SELECT TOP 1
+                            ar.ActualPaymentMethod_ID
+                        FROM ARTransaction ar
+                        WHERE ar.Key_ID = :1
+                            AND ar.KeyType = :2
+                            AND ar.Type_ID <> 11
+                            AND ar.ARBalanceDue_SC = 0
+                            AND ar.ActualPaymentMethod_ID IS NOT NULL
+                        ORDER BY ar.LastUpdate_Date DESC
+                        `;
+                        result = snowflake.execute({sqlText: sql_command, binds: [keyID, keyType]}).next();
+                        settlementMethodID = result.ACTUALPAYMENTMETHOD_ID;
+                    }
+                } catch (err) {
+                    throw new Error('Error fetching TrRawHeader or TrRawDetail data with binding arguments: ' + err.message);
+                }
+            }
+
+            try {
+                if (orderTypeID == 1 || orderTypeID == 13 || (orderTypeID == 4 && isAggregation)) {
+                    sql_command = `
+                    UPDATE #items
+                    SET
+                        ARPostDate = :1,
+                        SettlementMethod_ID = :2
+                    WHERE ClientOrder_ID = :3
+                    `;
+                    snowflake.execute({sqlText: sql_command, binds: [postDate, settlementMethodID, clientOrderID]});
+                } else {
+                    sql_command = `
+                    UPDATE #items
+                    SET
+                        ARPostDate = :1,
+                        SettlementMethod_ID = :2
+                    WHERE OrderDetail_ID = :3
+                    `;
+                    snowflake.execute({sqlText: sql_command, binds: [postDate, settlementMethodID, orderDetailID]});
+                }
+            } catch (err) {
+                throw new Error('Error updating #items with binding arguments: ' + err.message);
+            }
+
+            try {
+                if (orderTypeID == 1 || orderTypeID == 13 || (orderTypeID == 4 && isAggregation)) {
+                    sql_command = `
+                    DELETE FROM #cursor
+                    WHERE ClientOrder_ID = :1
+                    `;
+                    snowflake.execute({sqlText: sql_command, binds: [clientOrderID]});
+                } else {
+                    sql_command = `
+                    DELETE FROM #cursor
+                    WHERE OrderDetail_ID = :1
+                    `;
+                    snowflake.execute({sqlText: sql_command, binds: [orderDetailID]});
+                }
+            } catch (err) {
+                throw new Error('Error deleting from #cursor with binding arguments: ' + err.message);
+            }
+
+            // Fetch the next row
+            try {
+                sql_command = `
+                SELECT TOP 1
+                    ClientOrder_ID,
+                    OrderDetail_ID,
+                    RelatedClientOrder_ID,
+                    RelatedOrderDetail_ID,
+                    OrderType_ID,
+                    Ordered,
+                    IsAggregation
+                FROM #cursor
+                `;
+                result = snowflake.execute({sqlText: sql_command}).next();
+
+                if (!result) {
+                    break;
+                }
+
+                clientOrderID = result.CLIENTORDER_ID;
+                orderDetailID = result.ORDERDETAIL_ID;
+                relatedClientOrderID = result.RELATEDCLIENTORDER_ID;
+                relatedOrderDetailID = result.RELATEDORDERDETAIL_ID;
+                orderTypeID = result.ORDERTYPE_ID;
+                ordered = result.ORDERED;
+                isAggregation = result.ISAGGREGATION;
+            } catch (err) {
+                throw new Error('Error fetching next row from #cursor: ' + err.message);
+            }
+        } catch (err) {
+            throw new Error('Error processing rows: ' + err.message);
+        }
     }
 
     // Update SettlementMethod in #items
-    sql_command = `
-    UPDATE #items
-    SET SettlementMethod = p.Code
-    FROM PickListItem p
-    WHERE #items.SettlementMethod_ID = p.PickListItem_ID
-    `;
-    snowflake.execute({sqlText: sql_command});
+    try {
+        sql_command = `
+        UPDATE #items
+        SET SettlementMethod = p.Code
+        FROM PickListItem p
+        WHERE #items.SettlementMethod_ID = p.PickListItem_ID
+        `;
+        snowflake.execute({sqlText: sql_command});
+    } catch (err) {
+        throw new Error('Error updating SettlementMethod in #items: ' + err.message);
+    }
 
     // Final select statement
-    sql_command = `
-    SELECT 
-        ClientOrder_ID,
-        OrderDetail_ID,
-        RelatedClientOrder_ID,
-        RelatedOrderDetail_ID,
-        OrderType_ID,
-        Account,
-        ConfirmationNo,
-        ItemNo,
-        Ordered,
-        ARPostDate,
-        SettlementMethod_ID,
-        SettlementMethod,
-        SettlementAmount,
-        ItemType_ID,
-        ItemTypeDescription,
-        SendDate,
-        ValueDate,
-        ClearDate,
-        CurrencyCode,
-        ForeignAmount,
-        FundedBy,
-        FundedByDescription
-    FROM #items
-    ORDER BY Ordered
-    `;
-    var finalResult = snowflake.execute({sqlText: sql_command});
-
-    return finalResult;
+    try {
+        sql_command = `
+        SELECT 
+            ClientOrder_ID,
+            OrderDetail_ID,
+            RelatedClientOrder_ID,
+            RelatedOrderDetail_ID,
+            OrderType_ID,
+            Account,
+            ConfirmationNo,
+            ItemNo,
+            Ordered,
+            ARPostDate,
+            SettlementMethod_ID,
+            SettlementMethod,
+            SettlementAmount,
+            ItemType_ID,
+            ItemTypeDescription,
+            SendDate,
+            ValueDate,
+            ClearDate,
+            CurrencyCode,
+            ForeignAmount,
+            FundedBy,
+            FundedByDescription
+        FROM #items
+        ORDER BY Ordered
+        `;
+        var finalResult = snowflake.execute({sqlText: sql_command});
+        return finalResult;
+    } catch (err) {
+        throw new Error('Error executing final select statement: ' + err.message);
+    }
 } catch (err) {
     return 'Error: ' + err.message;
 }
 $$;
-
