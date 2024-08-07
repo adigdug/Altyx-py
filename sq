@@ -9,18 +9,6 @@ EXECUTE AS CALLER
 AS
 $$
 DECLARE
-    ClientOrder_ID INT;
-    OrderDetail_ID INT;
-    RelatedClientOrder_ID INT;
-    RelatedOrderDetail_ID INT;
-    OrderType_ID INT;
-    Key_ID INT;
-    KeyType INT;
-    SettlementAmount FLOAT;
-    PostDate TIMESTAMP;
-    SettlementMethod_ID INT;
-    Ordered TIMESTAMP;
-    IsAggregation BOOLEAN;
     OfficeID_Malta INT := 60;
     OpsStatuslistDeleted INT := 813;
 
@@ -150,76 +138,59 @@ BEGIN
         SELECT 1 FROM DBAUSE.ARTRANSACTION ar WHERE ar.ClientOrder_ID IN (i.ClientOrder_ID, i.RelatedClientOrder_ID)
     );
 
-    DECLARE cur CURSOR FOR
-    SELECT
-        ClientOrder_ID,
-        OrderDetail_ID,
-        RelatedClientOrder_ID,
-        RelatedOrderDetail_ID,
-        OrderType_ID,
-        Ordered,
-        IsAggregation
-    FROM CURSOR_TEMP;
+    FOR rec IN (SELECT * FROM CURSOR_TEMP) DO
+        LET ClientOrder_ID := rec.ClientOrder_ID;
+        LET OrderDetail_ID := rec.OrderDetail_ID;
+        LET RelatedClientOrder_ID := rec.RelatedClientOrder_ID;
+        LET RelatedOrderDetail_ID := rec.RelatedOrderDetail_ID;
+        LET OrderType_ID := rec.OrderType_ID;
+        LET Ordered := rec.Ordered;
+        LET IsAggregation := rec.IsAggregation;
 
-    OPEN cur;
-
-    FETCH NEXT FROM cur INTO
-        ClientOrder_ID,
-        OrderDetail_ID,
-        RelatedClientOrder_ID,
-        RelatedOrderDetail_ID,
-        OrderType_ID,
-        Ordered,
-        IsAggregation;
-
-    WHILE (ROWCOUNT > 0) DO
-        SET Key_ID = NULL;
-        SET KeyType = NULL;
+        LET Key_ID := NULL;
+        LET KeyType := NULL;
 
         IF OrderType_ID IN (1, 13) OR (OrderType_ID = 4 AND IsAggregation) THEN
-            SET Key_ID = ClientOrder_ID;
-            SET KeyType = 0;
+            Key_ID := ClientOrder_ID;
+            KeyType := 0;
         ELSEIF OrderType_ID = 9 THEN
-            SET Key_ID = RelatedOrderDetail_ID;
-            SET KeyType = 1;
+            Key_ID := RelatedOrderDetail_ID;
+            KeyType := 1;
         ELSE
-            SET Key_ID = OrderDetail_ID;
-            SET KeyType = 1;
+            Key_ID := OrderDetail_ID;
+            KeyType := 1;
         END IF;
 
-        SET PostDate = NULL;
-        SET SettlementMethod_ID = NULL;
+        LET PostDate := NULL;
+        LET SettlementMethod_ID := NULL;
 
         IF OrderType_ID = 9 THEN
-            SELECT TOP 1
-                ar.lastupdate_date,
-                ar.Actualpaymentmethod_id
-            INTO PostDate, SettlementMethod_ID
+            SELECT ar.lastupdate_date, ar.Actualpaymentmethod_id
+            INTO :PostDate, :SettlementMethod_ID
             FROM DBAUSE.ARTRANSACTION ar
             WHERE ar.key_id = Key_ID
             AND ar.keytype = KeyType
             AND ar.Type_ID <> 11
             AND ar.arbalancedue_sc = 0
             AND ar.lastupdate_date < Ordered
-            ORDER BY ar.lastupdate_date DESC;
+            ORDER BY ar.lastupdate_date DESC
+            LIMIT 1;
         ELSE
-            SELECT TOP 1
-                ar.lastupdate_date,
-                ar.Actualpaymentmethod_id
-            INTO PostDate, SettlementMethod_ID
+            SELECT ar.lastupdate_date, ar.Actualpaymentmethod_id
+            INTO :PostDate, :SettlementMethod_ID
             FROM DBAUSE.ARTRANSACTION ar
             WHERE ar.key_id = Key_ID
             AND ar.keytype = KeyType
             AND ar.Type_ID <> 11
             AND ar.arbalancedue_sc = 0
-            ORDER BY ar.lastupdate_date DESC;
+            ORDER BY ar.lastupdate_date DESC
+            LIMIT 1;
         END IF;
 
         IF SettlementMethod_ID IS NULL THEN
             IF OrderType_ID = 9 THEN
-                SELECT TOP 1
-                    ar.Actualpaymentmethod_id
-                INTO SettlementMethod_ID
+                SELECT ar.Actualpaymentmethod_id
+                INTO :SettlementMethod_ID
                 FROM DBAUSE.ARTRANSACTION ar
                 WHERE ar.key_id = Key_ID
                 AND ar.keytype = KeyType
@@ -227,63 +198,62 @@ BEGIN
                 AND ar.arbalancedue_sc = 0
                 AND ar.Actualpaymentmethod_id IS NOT NULL
                 AND ar.lastupdate_date < Ordered
-                ORDER BY ar.lastupdate_date DESC;
+                ORDER BY ar.lastupdate_date DESC
+                LIMIT 1;
             ELSE
-                SELECT TOP 1
-                    ar.Actualpaymentmethod_id
-                INTO SettlementMethod_ID
+                SELECT ar.Actualpaymentmethod_id
+                INTO :SettlementMethod_ID
                 FROM DBAUSE.ARTRANSACTION ar
                 WHERE ar.key_id = Key_ID
                 AND ar.keytype = KeyType
                 AND ar.Type_ID <> 11
                 AND ar.arbalancedue_sc = 0
                 AND ar.Actualpaymentmethod_id IS NOT NULL
-                ORDER BY ar.lastupdate_date DESC;
+                ORDER BY ar.lastupdate_date DESC
+                LIMIT 1;
             END IF;
         END IF;
 
         IF SettlementMethod_ID IS NULL AND OrderType_ID IN (1, 13) THEN
-            SET Key_ID = NULL;
+            Key_ID := NULL;
 
             IF RelatedClientOrder_ID IS NOT NULL THEN
                 SELECT ClientOrder_ID
-                INTO Key_ID
+                INTO :Key_ID
                 FROM DBAUSE.TRRAWHEADER
                 WHERE ClientOrder_ID = RelatedClientOrder_ID;
             END IF;
 
             IF Key_ID IS NULL THEN
                 SELECT dd.ClientOrder_ID
-                INTO Key_ID
+                INTO :Key_ID
                 FROM DBAUSE.TRRAWDETAIL d
                 JOIN DBAUSE.TRRAWDETAIL dd ON d.RelatedOrderDetail_ID = dd.OrderDetail_ID
                 WHERE d.OrderDetail_ID = OrderDetail_ID;
             END IF;
 
             IF Key_ID IS NOT NULL THEN
-                SELECT TOP 1
-                    ar.Actualpaymentmethod_id
-                INTO SettlementMethod_ID
+                SELECT ar.Actualpaymentmethod_id
+                INTO :SettlementMethod_ID
                 FROM DBAUSE.ARTRANSACTION ar
                 WHERE ar.key_id = Key_ID
                 AND ar.keytype = KeyType
                 AND ar.Type_ID <> 11
                 AND ar.arbalancedue_sc = 0
                 AND ar.Actualpaymentmethod_id IS NOT NULL
-                ORDER BY ar.lastupdate_date DESC;
+                ORDER BY ar.lastupdate_date DESC
+                LIMIT 1;
             END IF;
         END IF;
 
         IF OrderType_ID IN (1, 13) OR (OrderType_ID = 4 AND IsAggregation) THEN
             UPDATE ITEMS_TEMP
-            SET
-                ARPostDate = PostDate,
+            SET ARPostDate = PostDate,
                 SettlementMethod_ID = SettlementMethod_ID
             WHERE ClientOrder_ID = ClientOrder_ID;
         ELSE
             UPDATE ITEMS_TEMP
-            SET
-                ARPostDate = PostDate,
+            SET ARPostDate = PostDate,
                 SettlementMethod_ID = SettlementMethod_ID
             WHERE OrderDetail_ID = OrderDetail_ID;
         END IF;
@@ -291,18 +261,7 @@ BEGIN
         DELETE FROM CURSOR_TEMP
         WHERE ClientOrder_ID = ClientOrder_ID
         AND OrderDetail_ID = OrderDetail_ID;
-
-        FETCH NEXT FROM cur INTO
-            ClientOrder_ID,
-            OrderDetail_ID,
-            RelatedClientOrder_ID,
-            RelatedOrderDetail_ID,
-            OrderType_ID,
-            Ordered,
-            IsAggregation;
-    END WHILE;
-
-    CLOSE cur;
+    END FOR;
 
     -- Update ITEMS_TEMP with SettlementMethod
     UPDATE ITEMS_TEMP i
@@ -314,4 +273,3 @@ BEGIN
     RETURN 'Procedure executed successfully';
 END;
 $$;
-
