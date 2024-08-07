@@ -1,367 +1,314 @@
-import snowflake.connector
-from snowflake.connector import ProgrammingError
+USE DATABASE DBAUSE;
 
-# Establish connection to Snowflake
-conn = snowflake.connector.connect(
-    user='YOUR_USER',
-    password='YOUR_PASSWORD',
-    account='YOUR_ACCOUNT',
-    warehouse='YOUR_WAREHOUSE',
-    database='YOUR_DATABASE',
-    schema='YOUR_SCHEMA'
-)
+CREATE OR REPLACE PROCEDURE SP_PSD(PROCESSCENTER_ID INT, DAYSCLEARED INT, OFFICE_ID INT = NULL)
+RETURNS STRING
+LANGUAGE SQL
+AS
+$$
+DECLARE
+  CLIENTORDER_ID INT;
+  ORDERDETAIL_ID INT;
+  RELATEDCLIENTORDER_ID INT;
+  RELATEDORDERDETAIL_ID INT;
+  ORDERTYPE_ID INT;
+  KEY_ID INT;
+  KEYTYPE INT;
+  SETTLEMENTAMOUNT FLOAT;
+  POSTDATE TIMESTAMP;
+  SETTLEMENTMETHOD_ID INT;
+  ORDERED TIMESTAMP;
+  ISAGGREGATION BOOLEAN;
+  OFFICEID_MALTA INT := 60;
+  OPSSTATUSLISTDELETED INT := 813;
+BEGIN
 
-def create_procedure(conn):
-    try:
-        sql_command = """
-        CREATE OR REPLACE PROCEDURE SP_PSD(
-            ProcessCenter_ID INT,
-            DaysCleared INT,
-            Office_ID INT = NULL
-        )
-        RETURNS STRING
-        LANGUAGE PYTHON
-        EXECUTE AS CALLER
-        AS
-        $$
-        import snowflake.connector
-        import datetime
-        
-        def run_procedure(ProcessCenter_ID, DaysCleared, Office_ID):
-            conn = snowflake.connector.connect(
-                user=context['user'],
-                password=context['password'],
-                account=context['account']
-            )
-            cursor = conn.cursor()
-            clientOrderID, orderDetailID, relatedClientOrderID, relatedOrderDetailID, orderTypeID, keyID, keyType = None, None, None, None, None, None, None
-            settlementMethodID, isAggregation = None, None
-            officeIDMalta = 60
-            opsStatusListDeleted = 813
-            postDate, ordered = None, None
+  CREATE OR REPLACE TEMPORARY TABLE cursor_temp (
+    CLIENTORDER_ID INT,
+    ORDERDETAIL_ID INT,
+    RELATEDCLIENTORDER_ID INT,
+    RELATEDORDERDETAIL_ID INT,
+    ORDERTYPE_ID INT,
+    ORDERED TIMESTAMP,
+    ISAGGREGATION BOOLEAN
+  );
 
-            try:
-                cursor.execute("DROP TABLE IF EXISTS #cursor")
-                cursor.execute("DROP TABLE IF EXISTS #items")
+  CREATE OR REPLACE TEMPORARY TABLE items_temp (
+    CLIENTORDER_ID INT,
+    ORDERDETAIL_ID INT,
+    RELATEDCLIENTORDER_ID INT,
+    RELATEDORDERDETAIL_ID INT,
+    ORDERTYPE_ID INT,
+    ACCOUNT STRING,
+    CONFIRMATIONNO STRING,
+    ITEMNO INT,
+    ORDERED TIMESTAMP,
+    ARPOSTDATE TIMESTAMP,
+    SETTLEMENTMETHOD_ID INT,
+    SETTLEMENTMETHOD STRING,
+    SETTLEMENTCURRENCYCODE STRING,
+    SETTLEMENTAMOUNT FLOAT,
+    ITEMTYPE_ID INT,
+    ITEMTYPEDESCRIPTION STRING,
+    SENDDATE TIMESTAMP,
+    VALUEDATE TIMESTAMP,
+    CLEARDATE TIMESTAMP,
+    CURRENCYCODE STRING,
+    FOREIGNAMOUNT FLOAT,
+    FUNDEDBY INT,
+    FUNDEDBYDESCRIPTION STRING,
+    ISAGGREGATION BOOLEAN,
+    OURCHECKREF STRING
+  );
 
-                cursor.execute("""
-                CREATE TEMPORARY TABLE #cursor (
-                    ClientOrder_ID INT,
-                    OrderDetail_ID INT,
-                    RelatedClientOrder_ID INT,
-                    RelatedOrderDetail_ID INT,
-                    OrderType_ID INT,
-                    Ordered TIMESTAMP_NTZ,
-                    IsAggregation BOOLEAN
-                )
-                """)
+  INSERT INTO items_temp
+  SELECT 
+    h.CLIENTORDER_ID,
+    d.ORDERDETAIL_ID,
+    h.RELATEDCLIENTORDER_ID,
+    d.RELATEDORDERDETAIL_ID,
+    h.ORDERTYPE_ID,
+    c.ACCOUNT,
+    h.CONFIRMATIONNO,
+    d.ITEMNO,
+    h.ORDERED,
+    NULL, -- ARPOSTDATE
+    NULL, -- SETTLEMENTMETHOD_ID
+    NULL, -- SETTLEMENTMETHOD
+    h.SETTLEMENT_SWIFT, -- SETTLEMENTCURRENCYCODE
+    d.EXTENSION, -- SETTLEMENTAMOUNT
+    d.ITEMTYPE_ID,
+    d.ITEMTYPEDESCRIPTION,
+    COALESCE(
+      CASE WHEN o.STATUS_ID = 776 THEN o.STATUSUPDATED ELSE NULL END,
+      CASE WHEN oa.STATUS_ID = 776 THEN oa.STATUSUPDATED ELSE NULL END
+    ) AS SENDDATE,
+    COALESCE(o.VALUEDATE, oa.VALUEDATE) AS VALUEDATE,
+    r.CLEARDATE,
+    d.CURRENCYCODE,
+    d.FOREIGNAMOUNT,
+    d.FUNDEDBY,
+    REPLACE(p.DESCRIPTION, 'Payment Funded By - ', '') AS FUNDEDBYDESCRIPTION,
+    IFNULL(ex.ISAGGREGATION, 0),
+    d.OURCHECKREF
+  FROM rueschlink_dbo.client c
+  JOIN rlhistory_dbo.trrawdheader h ON c.CLIENT_ID = h.CLIENT_ID
+  JOIN rlhistory_dbo.trrawdetail d ON h.CLIENTORDER_ID = d.CLIENTORDER_ID
+  LEFT JOIN rlhistory_dbo.CLIENTORDER_EXTENDED_HISTORY ex ON h.CLIENTORDER_ID = ex.CLIENTORDER_ID
+  LEFT JOIN rlhistory_dbo.reconciliation_history r ON d.ORDERDETAIL_ID = r.ORDERDETAIL_ID
+  LEFT JOIN opsess_dbo.opslog o ON d.ORDERDETAIL_ID = o.ORDERDETAIL_ID
+  LEFT JOIN opsess_dbo.opslog_archive oa ON d.ORDERDETAIL_ID = oa.ORDERDETAIL_ID
+  LEFT JOIN rueschlink_dbo.PICKLISTITEM p ON d.FUNDEDBY = p.PICKLISTITEM_ID
+  WHERE c.PROCESSCENTER_ID = :PROCESSCENTER_ID
+    AND c.OFFICE_ID = IFNULL(NULLIF(:OFFICE_ID, -1), c.OFFICE_ID)
+    AND h.ORDERTYPE_ID IN (1, 4, 9, 13, 103)
+    AND d.ITEMTYPE_ID <> 117
+    AND (c.OFFICE_ID != 13 OR d.ITEMTYPE_ID != 3)
+    AND NOT (d.EXTENSION = 0 AND d.FOREIGNAMOUNT = 0)
+    AND c.STATUS_ID IN (3, 4)
+    AND IFNULL(r.CLEARDATE, CURRENT_TIMESTAMP) > DATEADD(DAY, -:DAYSCLEARED, CURRENT_TIMESTAMP)
+    AND (
+      (c.OFFICE_ID = :OFFICEID_MALTA AND YEAR(h.ORDERED) IN (YEAR(CURRENT_TIMESTAMP), YEAR(CURRENT_TIMESTAMP) - 1, YEAR(CURRENT_TIMESTAMP) - 2))
+      OR (c.OFFICE_ID != :OFFICEID_MALTA AND YEAR(h.ORDERED) IN (YEAR(CURRENT_TIMESTAMP), YEAR(CURRENT_TIMESTAMP) - 1))
+    );
 
-                cursor.execute("""
-                CREATE TEMPORARY TABLE #items (
-                    ClientOrder_ID INT,
-                    OrderDetail_ID INT,
-                    RelatedClientOrder_ID INT,
-                    RelatedOrderDetail_ID INT,
-                    OrderType_ID INT,
-                    Account STRING,
-                    ConfirmationNo STRING,
-                    ItemNo INT,
-                    Ordered TIMESTAMP_NTZ,
-                    ARPostDate TIMESTAMP_NTZ,
-                    SettlementMethod_ID INT,
-                    SettlementMethod STRING,
-                    SettlementCurrencyCode STRING,
-                    SettlementAmount FLOAT,
-                    ItemType_ID INT,
-                    ItemTypeDescription STRING,
-                    SendDate TIMESTAMP_NTZ,
-                    ValueDate TIMESTAMP_NTZ,
-                    ClearDate TIMESTAMP_NTZ,
-                    CurrencyCode STRING,
-                    ForeignAmount FLOAT,
-                    FundedBy INT,
-                    FundedByDescription STRING,
-                    IsAggregation BOOLEAN,
-                    OurCheckRef STRING
-                )
-                """)
+  DELETE FROM items_temp WHERE CLIENTORDER_ID IN (
+    SELECT PREVIOUSCLIENTORDER_ID FROM mars_dbo.rsrepurchase
+  );
 
-                insert_items_sql = f"""
-                INSERT INTO #items
-                SELECT 
-                    h.ClientOrder_ID,
-                    d.OrderDetail_ID,
-                    h.RelatedClientOrder_ID,
-                    D.RelatedOrderDetail_ID,
-                    h.OrderType_ID,
-                    c.Account,
-                    h.ConfirmationNo,
-                    d.ItemNo,
-                    h.Ordered,
-                    NULL, -- ARPostDate
-                    NULL, -- SettlementMethod_ID
-                    NULL, -- SettlementMethod
-                    h.Settlement_SWIFT, -- SettlementCurrencyCode
-                    d.Extension, -- SettlementAmount
-                    d.ItemType_ID,
-                    d.ItemTypeDescription,
-                    COALESCE(CASE o.status_id WHEN 776 THEN o.StatusUpdated ELSE NULL END,
-                             CASE oa.status_id WHEN 776 THEN oa.StatusUpdated ELSE NULL END), -- SendDate
-                    COALESCE(o.ValueDate, oa.ValueDate),
-                    r.ClearDate,
-                    d.CurrencyCode,
-                    d.ForeignAmount,
-                    d.FundedBy,
-                    REPLACE(p.Description, 'Payment Funded By - ', ''),
-                    NVL(ex.IsAggregation, FALSE),
-                    d.OurCheckRef
-                FROM 
-                    client c 
-                    JOIN TrRawHeader h ON c.Client_ID = h.Client_ID
-                    JOIN TrRawDetail d ON h.ClientOrder_ID = d.ClientOrder_ID
-                    LEFT JOIN ClientOrder_Extended_History ex ON h.ClientOrder_ID = ex.ClientOrder_ID
-                    LEFT JOIN Reconciliation_History r ON d.OrderDetail_ID = r.OrderDetail_ID
-                    LEFT JOIN OpsLog o ON d.OrderDetail_ID = o.OrderDetail_ID
-                    LEFT JOIN OpsLog_Archive oa ON d.OrderDetail_ID = oa.OrderDetail_ID
-                    LEFT JOIN PickListItem p ON d.FundedBy = p.PickListItem_ID
-                WHERE 
-                    c.ProcessCenter_ID = {ProcessCenter_ID}
-                    AND c.Office_ID = COALESCE(NULLIF({Office_ID}, -1), c.Office_ID)
-                    AND h.OrderType_ID IN (1, 4, 9, 13, 103)
-                    AND d.ItemType_ID <> 117
-                    AND (c.Office_ID != 13 OR d.ItemType_ID != 3)
-                    AND NOT (d.Extension = 0 AND d.ForeignAmount = 0)
-                    AND c.Status_ID IN (3, 4)
-                    AND COALESCE(r.ClearDate, CURRENT_TIMESTAMP) > DATEADD(day, -{DaysCleared}, CURRENT_TIMESTAMP)
-                    AND (
-                        (c.Office_ID = {officeIDMalta} AND YEAR(h.Ordered) IN (YEAR(CURRENT_DATE), YEAR(CURRENT_DATE) - 1, YEAR(CURRENT_DATE) - 2))
-                        OR
-                        (c.Office_ID != {officeIDMalta} AND YEAR(h.Ordered) IN (YEAR(CURRENT_DATE), YEAR(CURRENT_DATE) - 1))
-                    )
-                """
-                cursor.execute(insert_items_sql)
+  DELETE FROM items_temp WHERE OURCHECKREF = 'No new EFT';
 
-                cursor.execute("DELETE FROM #items WHERE ClientOrder_ID IN (SELECT PreviousClientOrder_ID FROM RSRepurchase)")
-                cursor.execute("DELETE FROM #items WHERE OurCheckRef = 'No new EFT'")
-                cursor.execute(f"DELETE FROM #items WHERE OrderDetail_ID IN (SELECT OrderDetail_ID FROM OpsLog_Archive WHERE Status_ID = {opsStatusListDeleted})")
+  DELETE FROM items_temp WHERE ORDERDETAIL_ID IN (
+    SELECT ORDERDETAIL_ID FROM opsess_dbo.OPSLOG_ARCHIVE WHERE STATUS_ID = :OPSSTATUSLISTDELETED
+  );
 
-                cursor.execute("""
-                INSERT INTO #cursor
-                SELECT
-                    ClientOrder_ID,
-                    OrderDetail_ID,
-                    RelatedClientOrder_ID, 
-                    RelatedOrderDetail_ID,
-                    OrderType_ID,
-                    Ordered,
-                    IsAggregation
-                FROM #items i
-                WHERE EXISTS (
-                    SELECT 1
-                    FROM ARTransaction AS AR
-                    WHERE AR.ClientOrder_ID IN (i.ClientOrder_ID, i.RelatedClientOrder_ID)
-                )
-                """)
+  INSERT INTO cursor_temp
+  SELECT
+    CLIENTORDER_ID,
+    ORDERDETAIL_ID,
+    RELATEDCLIENTORDER_ID,
+    RELATEDORDERDETAIL_ID,
+    ORDERTYPE_ID,
+    ORDERED,
+    ISAGGREGATION
+  FROM items_temp
+  WHERE EXISTS (
+    SELECT 1
+    FROM ARInterface_dbo.ARTRANSACTION ar
+    WHERE ar.CLIENTORDER_ID IN (items_temp.CLIENTORDER_ID, items_temp.RELATEDCLIENTORDER_ID)
+  );
 
-                result = cursor.execute("SELECT TOP 1 ClientOrder_ID, OrderDetail_ID, RelatedClientOrder_ID, RelatedOrderDetail_ID, OrderType_ID, Ordered, IsAggregation FROM #cursor").fetchone()
-                if result:
-                    clientOrderID, orderDetailID, relatedClientOrderID, relatedOrderDetailID, orderTypeID, ordered, isAggregation = result
+  WHILE TRUE
+  DO
+    SELECT 
+      CLIENTORDER_ID,
+      ORDERDETAIL_ID,
+      RELATEDCLIENTORDER_ID,
+      RELATEDORDERDETAIL_ID,
+      ORDERTYPE_ID,
+      ORDERED,
+      ISAGGREGATION
+    INTO
+      CLIENTORDER_ID,
+      ORDERDETAIL_ID,
+      RELATEDCLIENTORDER_ID,
+      RELATEDORDERDETAIL_ID,
+      ORDERTYPE_ID,
+      ORDERED,
+      ISAGGREGATION
+    FROM cursor_temp
+    LIMIT 1;
 
-                while result:
-                    keyID = None
-                    keyType = None
+    IF SQL%ROWCOUNT = 0 THEN
+      LEAVE;
+    END IF;
 
-                    if orderTypeID in (1, 13) or (orderTypeID == 4 and isAggregation):
-                        keyID = clientOrderID
-                        keyType = 0
-                    elif orderTypeID == 9:
-                        keyID = relatedOrderDetailID
-                        keyType = 1
-                    else:
-                        keyID = orderDetailID
-                        keyType = 1
+    KEY_ID := NULL;
+    KEYTYPE := NULL;
 
-                    postDate = None
-                    settlementMethodID = None
+    IF ORDERTYPE_ID IN (1, 13) OR (ORDERTYPE_ID = 4 AND ISAGGREGATION) THEN
+      KEY_ID := CLIENTORDER_ID;
+      KEYTYPE := 0;
+    ELSEIF ORDERTYPE_ID = 9 THEN
+      KEY_ID := RELATEDORDERDETAIL_ID;
+      KEYTYPE := 1;
+    ELSE
+      KEY_ID := ORDERDETAIL_ID;
+      KEYTYPE := 1;
+    END IF;
 
-                    if orderTypeID == 9:
-                        result = cursor.execute(f"""
-                        SELECT TOP 1 ar.LastUpdate_Date, ar.ActualPaymentMethod_ID
-                        FROM ARTransaction ar
-                        WHERE ar.Key_ID = {keyID}
-                            AND ar.KeyType = {keyType}
-                            AND ar.Type_ID <> 11
-                            AND ar.ARBalanceDue_SC = 0
-                            AND ar.LastUpdate_Date < '{ordered}'
-                        ORDER BY ar.LastUpdate_Date DESC
-                        """).fetchone()
-                        if result:
-                            postDate, settlementMethodID = result
-                    else:
-                        result = cursor.execute(f"""
-                        SELECT TOP 1 ar.LastUpdate_Date, ar.ActualPaymentMethod_ID
-                        FROM ARTransaction ar
-                        WHERE ar.Key_ID = {keyID}
-                            AND ar.KeyType = {keyType}
-                            AND ar.Type_ID <> 11
-                            AND ar.ARBalanceDue_SC = 0
-                        ORDER BY ar.LastUpdate_Date DESC
-                        """).fetchone()
-                        if result:
-                            postDate, settlementMethodID = result
+    POSTDATE := NULL;
+    SETTLEMENTMETHOD_ID := NULL;
 
-                    if not settlementMethodID and result:
-                        if orderTypeID == 9:
-                            result = cursor.execute(f"""
-                            SELECT TOP 1 ar.ActualPaymentMethod_ID
-                            FROM ARTransaction ar
-                            WHERE ar.Key_ID = {keyID}
-                                AND ar.KeyType = {keyType}
-                                AND ar.Type_ID <> 11
-                                AND ar.ARBalanceDue_SC = 0
-                                AND ar.ActualPaymentMethod_ID IS NOT NULL
-                                AND ar.LastUpdate_Date < '{ordered}'
-                            ORDER BY ar.LastUpdate_Date DESC
-                            """).fetchone()
-                            if result:
-                                settlementMethodID = result[0]
-                        else:
-                            result = cursor.execute(f"""
-                            SELECT TOP 1 ar.ActualPaymentMethod_ID
-                            FROM ARTransaction ar
-                            WHERE ar.Key_ID = {keyID}
-                                AND ar.KeyType = {keyType}
-                                AND ar.Type_ID <> 11
-                                AND ar.ARBalanceDue_SC = 0
-                                AND ar.ActualPaymentMethod_ID IS NOT NULL
-                            ORDER BY ar.LastUpdate_Date DESC
-                            """).fetchone()
-                            if result:
-                                settlementMethodID = result[0]
+    IF ORDERTYPE_ID = 9 THEN
+      SELECT 
+        ar.LASTUPDATE_DATE,
+        ar.ACTUALPAYMENTMETHOD_ID
+      INTO
+        POSTDATE,
+        SETTLEMENTMETHOD_ID
+      FROM ARInterface_dbo.ARTRANSACTION ar
+      WHERE ar.KEY_ID = KEY_ID
+        AND ar.KEYTYPE = KEYTYPE
+        AND ar.TYPE_ID <> 11
+        AND ar.ARBALANCEDUE_SC = 0
+        AND ar.LASTUPDATE_DATE < ORDERED
+      ORDER BY ar.LASTUPDATE_DATE DESC
+      LIMIT 1;
+    ELSE
+      SELECT 
+        ar.LASTUPDATE_DATE,
+        ar.ACTUALPAYMENTMETHOD_ID
+      INTO
+        POSTDATE,
+        SETTLEMENTMETHOD_ID
+      FROM ARInterface_dbo.ARTRANSACTION ar
+      WHERE ar.KEY_ID = KEY_ID
+        AND ar.KEYTYPE = KEYTYPE
+        AND ar.TYPE_ID <> 11
+        AND ar.ARBALANCEDUE_SC = 0
+      ORDER BY ar.LASTUPDATE_DATE DESC
+      LIMIT 1;
+    END IF;
 
-                    if not settlementMethodID and orderTypeID in (1, 13):
-                        keyID = None
+    IF SETTLEMENTMETHOD_ID IS NULL THEN
+      IF ORDERTYPE_ID = 9 THEN
+        SELECT 
+          ar.ACTUALPAYMENTMETHOD_ID
+        INTO
+          SETTLEMENTMETHOD_ID
+        FROM ARInterface_dbo.ARTRANSACTION ar
+        WHERE ar.KEY_ID = KEY_ID
+          AND ar.KEYTYPE = KEYTYPE
+          AND ar.TYPE_ID <> 11
+          AND ar.ARBALANCEDUE_SC = 0
+          AND ar.ACTUALPAYMENTMETHOD_ID IS NOT NULL
+          AND ar.LASTUPDATE_DATE < ORDERED
+        ORDER BY ar.LASTUPDATE_DATE DESC
+        LIMIT 1;
+      ELSE
+        SELECT 
+          ar.ACTUALPAYMENTMETHOD_ID
+        INTO
+          SETTLEMENTMETHOD_ID
+        FROM ARInterface_dbo.ARTRANSACTION ar
+        WHERE ar.KEY_ID = KEY_ID
+          AND ar.KEYTYPE = KEYTYPE
+          AND ar.TYPE_ID <> 11
+          AND ar.ARBALANCEDUE_SC = 0
+          AND ar.ACTUALPAYMENTMETHOD_ID IS NOT NULL
+        ORDER BY ar.LASTUPDATE_DATE DESC
+        LIMIT 1;
+      END IF;
+    END IF;
 
-                        if relatedClientOrderID:
-                            result = cursor.execute(f"""
-                            SELECT RelatedClientOrder_ID
-                            FROM TrRawHeader
-                            WHERE ClientOrder_ID = {relatedClientOrderID}
-                            """).fetchone()
-                            if result:
-                                keyID = result[0]
+    IF SETTLEMENTMETHOD_ID IS NULL AND ORDERTYPE_ID IN (1, 13) THEN
+      KEY_ID := NULL;
 
-                        if not keyID:
-                            result = cursor.execute(f"""
-                            SELECT dd.ClientOrder_ID
-                            FROM TrRawDetail d
-                            JOIN TrRawDetail dd ON d.RelatedOrderDetail_ID = dd.OrderDetail_ID
-                            WHERE d.OrderDetail_ID = {orderDetailID}
-                            """).fetchone()
-                            if result:
-                                keyID = result[0]
+      IF RELATEDCLIENTORDER_ID IS NOT NULL THEN
+        SELECT 
+          RELATEDCLIENTORDER_ID
+        INTO
+          KEY_ID
+        FROM rlhistory_dbo.trrawdheader
+        WHERE CLIENTORDER_ID = RELATEDCLIENTORDER_ID;
+      END IF;
 
-                        if keyID:
-                            result = cursor.execute(f"""
-                            SELECT TOP 1 ar.ActualPaymentMethod_ID
-                            FROM ARTransaction ar
-                            WHERE ar.Key_ID = {keyID}
-                                AND ar.KeyType = {keyType}
-                                AND ar.Type_ID <> 11
-                                AND ar.ARBalanceDue_SC = 0
-                                AND ar.ActualPaymentMethod_ID IS NOT NULL
-                            ORDER BY ar.LastUpdate_Date DESC
-                            """).fetchone()
-                            if result:
-                                settlementMethodID = result[0]
+      IF KEY_ID IS NULL THEN
+        SELECT 
+          dd.CLIENTORDER_ID
+        INTO
+          KEY_ID
+        FROM rlhistory_dbo.trrawdetail d
+        JOIN rlhistory_dbo.trrawdetail dd ON d.RELATEDORDERDETAIL_ID = dd.ORDERDETAIL_ID
+        WHERE d.ORDERDETAIL_ID = ORDERDETAIL_ID;
+      END IF;
 
-                    if orderTypeID in (1, 13) or (orderTypeID == 4 and isAggregation):
-                        cursor.execute(f"""
-                        UPDATE #items
-                        SET ARPostDate = '{postDate}', SettlementMethod_ID = {settlementMethodID}
-                        WHERE ClientOrder_ID = {clientOrderID}
-                        """)
-                    else:
-                        cursor.execute(f"""
-                        UPDATE #items
-                        SET ARPostDate = '{postDate}', SettlementMethod_ID = {settlementMethodID}
-                        WHERE OrderDetail_ID = {orderDetailID}
-                        """)
+      IF KEY_ID IS NOT NULL THEN
+        SELECT 
+          ar.ACTUALPAYMENTMETHOD_ID
+        INTO
+          SETTLEMENTMETHOD_ID
+        FROM ARInterface_dbo.ARTRANSACTION ar
+        WHERE ar.KEY_ID = KEY_ID
+          AND ar.KEYTYPE = KEYTYPE
+          AND ar.TYPE_ID <> 11
+          AND ar.ARBALANCEDUE_SC = 0
+          AND ar.ACTUALPAYMENTMETHOD_ID IS NOT NULL
+        ORDER BY ar.LASTUPDATE_DATE DESC
+        LIMIT 1;
+      END IF;
+    END IF;
 
-                    if orderTypeID in (1, 13) or (orderTypeID == 4 and isAggregation):
-                        cursor.execute(f"DELETE FROM #cursor WHERE ClientOrder_ID = {clientOrderID}")
-                    else:
-                        cursor.execute(f"DELETE FROM #cursor WHERE OrderDetail_ID = {orderDetailID}")
+    IF ORDERTYPE_ID IN (1, 13) OR (ORDERTYPE_ID = 4 AND ISAGGREGATION) THEN
+      UPDATE items_temp
+      SET
+        ARPOSTDATE = POSTDATE,
+        SETTLEMENTMETHOD_ID = SETTLEMENTMETHOD_ID
+      WHERE CLIENTORDER_ID = CLIENTORDER_ID;
+    ELSE
+      UPDATE items_temp
+      SET
+        ARPOSTDATE = POSTDATE,
+        SETTLEMENTMETHOD_ID = SETTLEMENTMETHOD_ID
+      WHERE ORDERDETAIL_ID = ORDERDETAIL_ID;
+    END IF;
 
-                    result = cursor.execute("SELECT TOP 1 ClientOrder_ID, OrderDetail_ID, RelatedClientOrder_ID, RelatedOrderDetail_ID, OrderType_ID, Ordered, IsAggregation FROM #cursor").fetchone()
-                    if not result:
-                        break
+    IF ORDERTYPE_ID IN (1, 13) OR (ORDERTYPE_ID = 4 AND ISAGGREGATION) THEN
+      DELETE FROM cursor_temp WHERE CLIENTORDER_ID = CLIENTORDER_ID;
+    ELSE
+      DELETE FROM cursor_temp WHERE ORDERDETAIL_ID = ORDERDETAIL_ID;
+    END IF;
+  END WHILE;
 
-                    clientOrderID, orderDetailID, relatedClientOrderID, relatedOrderDetailID, orderTypeID, ordered, isAggregation = result
+  UPDATE items_temp
+  SET SETTLEMENTMETHOD = p.CODE
+  FROM rueschlink_dbo.PICKLISTITEM p
+  WHERE items_temp.SETTLEMENTMETHOD_ID = p.PICKLISTITEM_ID;
 
-                cursor.execute("""
-                UPDATE #items
-                SET SettlementMethod = p.Code
-                FROM PickListItem p
-                WHERE #items.SettlementMethod_ID = p.PickListItem_ID
-                """)
+  RETURN 'Procedure executed successfully';
+END;
+$$;
 
-                result = cursor.execute("""
-                SELECT 
-                    ClientOrder_ID,
-                    OrderDetail_ID,
-                    RelatedClientOrder_ID,
-                    RelatedOrderDetail_ID,
-                    OrderType_ID,
-                    Account,
-                    ConfirmationNo,
-                    ItemNo,
-                    Ordered,
-                    ARPostDate,
-                    SettlementMethod_ID,
-                    SettlementMethod,
-                    SettlementAmount,
-                    ItemType_ID,
-                    ItemTypeDescription,
-                    SendDate,
-                    ValueDate,
-                    ClearDate,
-                    CurrencyCode,
-                    ForeignAmount,
-                    FundedBy,
-                    FundedByDescription
-                FROM #items
-                ORDER BY Ordered
-                """).fetchall()
-
-                return str(result)
-            except ProgrammingError as e:
-                return 'ProgrammingError: ' + str(e)
-            except Exception as e:
-                return 'Error: ' + str(e)
-            finally:
-                cursor.close()
-                conn.close()
-
-        return run_procedure(ProcessCenter_ID, DaysCleared, Office_ID)
-        $$;
-        """
-        conn.cursor().execute(sql_command)
-        print("Procedure created successfully.")
-    except Exception as e:
-        print(f"Error creating procedure: {e}")
-
-# Call the create_procedure function to create the procedure in Snowflake
-create_procedure(conn)
-
-# Execute the procedure
-try:
-    cur = conn.cursor()
-    cur.execute("CALL SP_PSD(1, 30, NULL)")
-    for (col1,) in cur:
-        print(col1)
-except Exception as e:
-    print(f"Error executing procedure: {e}")
-finally:
-    cur.close()
-    conn.close()
+-- Set the session parameters
+ALTER SESSION SET QUOTED_IDENTIFIERS_IGNORE_CASE = TRUE;
+ALTER SESSION SET ANSI_NULLS = TRUE;
