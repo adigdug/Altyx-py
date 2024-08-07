@@ -1,1 +1,317 @@
+CREATE OR REPLACE PROCEDURE SP_PSD(
+    ProcessCenter_ID INT,
+    DaysCLeared INT,
+    Office_ID INT = NULL
+)
+RETURNS STRING
+LANGUAGE SQL
+EXECUTE AS CALLER
+AS
+$$
+DECLARE
+    ClientOrder_ID INT;
+    OrderDetail_ID INT;
+    RelatedClientOrder_ID INT;
+    RelatedOrderDetail_ID INT;
+    OrderType_ID INT;
+    Key_ID INT;
+    KeyType INT;
+    SettlementAmount FLOAT;
+    PostDate TIMESTAMP;
+    SettlementMethod_ID INT;
+    Ordered TIMESTAMP;
+    IsAggregation BOOLEAN;
+    OfficeID_Malta INT := 60;
+    OpsStatuslistDeleted INT := 813;
+
+BEGIN
+    -- Drop temp tables if they exist
+    IF EXISTS (SELECT 1 FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = 'CURSOR_TEMP') THEN
+        DROP TABLE CURSOR_TEMP;
+    END IF;
+
+    IF EXISTS (SELECT 1 FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = 'ITEMS_TEMP') THEN
+        DROP TABLE ITEMS_TEMP;
+    END IF;
+
+    -- Create temp tables
+    CREATE TEMP TABLE CURSOR_TEMP (
+        ClientOrder_ID INT,
+        OrderDetail_ID INT,
+        RelatedClientOrder_ID INT,
+        RelatedOrderDetail_ID INT,
+        OrderType_ID INT,
+        Ordered TIMESTAMP,
+        IsAggregation BOOLEAN
+    );
+
+    CREATE TEMP TABLE ITEMS_TEMP (
+        ClientOrder_ID INT,
+        OrderDetail_ID INT,
+        RelatedClientOrder_ID INT,
+        RelatedOrderDetail_ID INT,
+        OrderType_ID INT,
+        Account STRING,
+        ConfirmationNo STRING,
+        ItemNo INT,
+        Ordered TIMESTAMP,
+        ARPostDate TIMESTAMP,
+        SettlementMethod_ID INT,
+        SettlementMethod STRING,
+        SettlementCurrencyCode STRING,
+        SettlementAmount FLOAT,
+        ItemType_ID INT,
+        ItemTypeDescription STRING,
+        Senddate TIMESTAMP,
+        ValueDate TIMESTAMP,
+        ClearDate TIMESTAMP,
+        CurrencyCode STRING,
+        ForeignAmount FLOAT,
+        FundedBy INT,
+        FundedByDescription STRING,
+        IsAggregation BOOLEAN,
+        OurCheckRef STRING
+    );
+
+    -- Insert data into ITEMS_TEMP
+    INSERT INTO ITEMS_TEMP
+    SELECT 
+        h.ClientOrder_ID,
+        d.OrderDetail_ID,
+        h.RelatedClientOrder_ID,
+        d.RelatedOrderDetail_ID,
+        h.OrderType_ID,
+        c.Account,
+        h.ConfirmationNo,
+        d.ItemNo,
+        h.Ordered,
+        NULL, -- ARPostDate
+        NULL, -- SettlementMethod_ID
+        NULL, -- SettlementMethod
+        h.Settlement_SWIFT, -- SettlementCurrencyCode
+        d.Extension, -- SettlementAmount
+        d.ItemType_ID,
+        d.ItemTypeDescription,
+        COALESCE(CASE o.status_id WHEN 776 THEN o.StatusUpdated ELSE NULL END,
+                 CASE oa.status_id WHEN 776 THEN oa.StatusUpdated ELSE NULL END), -- Senddate
+        COALESCE(o.ValueDate, oa.ValueDate),
+        r.ClearDate,
+        d.CurrencyCode,
+        d.ForeignAmount,
+        d.FundedBy,
+        REPLACE(P.Description, 'Payment Funded By - ', ''),
+        ISNULL(ex.IsAggregation, FALSE),
+        d.OurCheckRef
+    FROM DBAUSE.CLIENT c
+    JOIN DBAUSE.TRRAWHEADER h ON c.Client_ID = h.Client_ID
+    JOIN DBAUSE.TRRAWDETAIL d ON h.ClientOrder_ID = d.ClientOrder_ID
+    LEFT JOIN DBAUSE.CLIENTORDER_EXTENDED_HISTORY ex ON h.ClientOrder_ID = ex.ClientOrder_ID
+    LEFT JOIN DBAUSE.RECONCILIATION_HISTORY r ON d.OrderDetail_ID = r.OrderDetail_ID
+    LEFT JOIN DBAUSE.OPSLOG o ON d.OrderDetail_ID = o.OrderDetail_ID
+    LEFT JOIN DBAUSE.OPSLOG_ARCHIVE oa ON d.OrderDetail_ID = oa.OrderDetail_ID
+    LEFT JOIN DBAUSE.PICKLISTITEM p ON d.FundedBy = p.PicklistItem_ID
+    WHERE c.ProcessCenter_ID = ProcessCenter_ID
+    AND c.Office_ID = COALESCE(NULLIF(Office_ID, -1), c.Office_ID)
+    AND h.OrderType_ID IN (1, 4, 9, 13, 103)
+    AND d.ItemType_ID <> 117
+    AND (c.Office_ID != 13 OR d.ItemType_ID != 3)
+    AND NOT (d.Extension = 0 AND d.ForeignAmount = 0)
+    AND c.Status_ID IN (3, 4)
+    AND ISNULL(r.ClearDate, CURRENT_TIMESTAMP) > DATEADD(DAY, -DaysCLeared, CURRENT_TIMESTAMP)
+    AND (
+        (c.Office_ID IN (OfficeID_Malta) AND YEAR(h.Ordered) IN (YEAR(CURRENT_TIMESTAMP), YEAR(CURRENT_TIMESTAMP)-1, YEAR(CURRENT_TIMESTAMP)-2))
+        OR
+        (c.Office_ID NOT IN (OfficeID_Malta)) AND YEAR(h.Ordered) IN (YEAR(CURRENT_TIMESTAMP), YEAR(CURRENT_TIMESTAMP)-1)
+    );
+
+    -- Delete unwanted records from ITEMS_TEMP
+    DELETE FROM ITEMS_TEMP WHERE ClientOrder_ID IN (
+        SELECT PreviousClientOrder_ID FROM DBAUSE.RSREPURCHASE
+    );
+
+    DELETE FROM ITEMS_TEMP WHERE OurCheckRef = 'No new EFT';
+
+    DELETE FROM ITEMS_TEMP WHERE OrderDetail_ID IN (
+        SELECT OrderDetail_ID FROM DBAUSE.OPSLOG_ARCHIVE WHERE Status_ID = OpsStatuslistDeleted
+    );
+
+    -- Insert into CURSOR_TEMP
+    INSERT INTO CURSOR_TEMP
+    SELECT
+        ClientOrder_ID,
+        OrderDetail_ID,
+        RelatedClientOrder_ID,
+        RelatedOrderDetail_ID,
+        OrderType_ID,
+        Ordered,
+        IsAggregation
+    FROM ITEMS_TEMP i
+    WHERE EXISTS (
+        SELECT 1 FROM DBAUSE.ARTRANSACTION ar WHERE ar.ClientOrder_ID IN (i.ClientOrder_ID, i.RelatedClientOrder_ID)
+    );
+
+    DECLARE cur CURSOR FOR
+    SELECT
+        ClientOrder_ID,
+        OrderDetail_ID,
+        RelatedClientOrder_ID,
+        RelatedOrderDetail_ID,
+        OrderType_ID,
+        Ordered,
+        IsAggregation
+    FROM CURSOR_TEMP;
+
+    OPEN cur;
+
+    FETCH NEXT FROM cur INTO
+        ClientOrder_ID,
+        OrderDetail_ID,
+        RelatedClientOrder_ID,
+        RelatedOrderDetail_ID,
+        OrderType_ID,
+        Ordered,
+        IsAggregation;
+
+    WHILE (ROWCOUNT > 0) DO
+        SET Key_ID = NULL;
+        SET KeyType = NULL;
+
+        IF OrderType_ID IN (1, 13) OR (OrderType_ID = 4 AND IsAggregation) THEN
+            SET Key_ID = ClientOrder_ID;
+            SET KeyType = 0;
+        ELSEIF OrderType_ID = 9 THEN
+            SET Key_ID = RelatedOrderDetail_ID;
+            SET KeyType = 1;
+        ELSE
+            SET Key_ID = OrderDetail_ID;
+            SET KeyType = 1;
+        END IF;
+
+        SET PostDate = NULL;
+        SET SettlementMethod_ID = NULL;
+
+        IF OrderType_ID = 9 THEN
+            SELECT TOP 1
+                ar.lastupdate_date,
+                ar.Actualpaymentmethod_id
+            INTO PostDate, SettlementMethod_ID
+            FROM DBAUSE.ARTRANSACTION ar
+            WHERE ar.key_id = Key_ID
+            AND ar.keytype = KeyType
+            AND ar.Type_ID <> 11
+            AND ar.arbalancedue_sc = 0
+            AND ar.lastupdate_date < Ordered
+            ORDER BY ar.lastupdate_date DESC;
+        ELSE
+            SELECT TOP 1
+                ar.lastupdate_date,
+                ar.Actualpaymentmethod_id
+            INTO PostDate, SettlementMethod_ID
+            FROM DBAUSE.ARTRANSACTION ar
+            WHERE ar.key_id = Key_ID
+            AND ar.keytype = KeyType
+            AND ar.Type_ID <> 11
+            AND ar.arbalancedue_sc = 0
+            ORDER BY ar.lastupdate_date DESC;
+        END IF;
+
+        IF SettlementMethod_ID IS NULL THEN
+            IF OrderType_ID = 9 THEN
+                SELECT TOP 1
+                    ar.Actualpaymentmethod_id
+                INTO SettlementMethod_ID
+                FROM DBAUSE.ARTRANSACTION ar
+                WHERE ar.key_id = Key_ID
+                AND ar.keytype = KeyType
+                AND ar.Type_ID <> 11
+                AND ar.arbalancedue_sc = 0
+                AND ar.Actualpaymentmethod_id IS NOT NULL
+                AND ar.lastupdate_date < Ordered
+                ORDER BY ar.lastupdate_date DESC;
+            ELSE
+                SELECT TOP 1
+                    ar.Actualpaymentmethod_id
+                INTO SettlementMethod_ID
+                FROM DBAUSE.ARTRANSACTION ar
+                WHERE ar.key_id = Key_ID
+                AND ar.keytype = KeyType
+                AND ar.Type_ID <> 11
+                AND ar.arbalancedue_sc = 0
+                AND ar.Actualpaymentmethod_id IS NOT NULL
+                ORDER BY ar.lastupdate_date DESC;
+            END IF;
+        END IF;
+
+        IF SettlementMethod_ID IS NULL AND OrderType_ID IN (1, 13) THEN
+            SET Key_ID = NULL;
+
+            IF RelatedClientOrder_ID IS NOT NULL THEN
+                SELECT ClientOrder_ID
+                INTO Key_ID
+                FROM DBAUSE.TRRAWHEADER
+                WHERE ClientOrder_ID = RelatedClientOrder_ID;
+            END IF;
+
+            IF Key_ID IS NULL THEN
+                SELECT dd.ClientOrder_ID
+                INTO Key_ID
+                FROM DBAUSE.TRRAWDETAIL d
+                JOIN DBAUSE.TRRAWDETAIL dd ON d.RelatedOrderDetail_ID = dd.OrderDetail_ID
+                WHERE d.OrderDetail_ID = OrderDetail_ID;
+            END IF;
+
+            IF Key_ID IS NOT NULL THEN
+                SELECT TOP 1
+                    ar.Actualpaymentmethod_id
+                INTO SettlementMethod_ID
+                FROM DBAUSE.ARTRANSACTION ar
+                WHERE ar.key_id = Key_ID
+                AND ar.keytype = KeyType
+                AND ar.Type_ID <> 11
+                AND ar.arbalancedue_sc = 0
+                AND ar.Actualpaymentmethod_id IS NOT NULL
+                ORDER BY ar.lastupdate_date DESC;
+            END IF;
+        END IF;
+
+        IF OrderType_ID IN (1, 13) OR (OrderType_ID = 4 AND IsAggregation) THEN
+            UPDATE ITEMS_TEMP
+            SET
+                ARPostDate = PostDate,
+                SettlementMethod_ID = SettlementMethod_ID
+            WHERE ClientOrder_ID = ClientOrder_ID;
+        ELSE
+            UPDATE ITEMS_TEMP
+            SET
+                ARPostDate = PostDate,
+                SettlementMethod_ID = SettlementMethod_ID
+            WHERE OrderDetail_ID = OrderDetail_ID;
+        END IF;
+
+        DELETE FROM CURSOR_TEMP
+        WHERE ClientOrder_ID = ClientOrder_ID
+        AND OrderDetail_ID = OrderDetail_ID;
+
+        FETCH NEXT FROM cur INTO
+            ClientOrder_ID,
+            OrderDetail_ID,
+            RelatedClientOrder_ID,
+            RelatedOrderDetail_ID,
+            OrderType_ID,
+            Ordered,
+            IsAggregation;
+    END WHILE;
+
+    CLOSE cur;
+
+    -- Update ITEMS_TEMP with SettlementMethod
+    UPDATE ITEMS_TEMP i
+    SET SettlementMethod = p.Code
+    FROM DBAUSE.PICKLISTITEM p
+    WHERE i.SettlementMethod_ID = p.PicklistItem_ID;
+
+    -- Select final result
+    RETURN 'Procedure executed successfully';
+END;
+$$;
 
