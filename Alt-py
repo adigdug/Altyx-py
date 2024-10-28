@@ -1,75 +1,27 @@
-import xml.etree.ElementTree as ET
+Define the Workflow Structure:
 
-class Tool:
-    def __init__(self, id, name, tool_type, properties):
-        self.id = id
-        self.name = name
-        self.tool_type = tool_type
-        self.properties = properties
+Break down each step into separate stages in the Python script. Each stage will handle a specific task (e.g., importing data, calculating values, filtering information, formatting columns).
+Data Import and Initialization:
 
-    def __repr__(self):
-        return f"Tool(id={self.id}, name={self.name}, tool_type={self.tool_type})"
+Start by importing the necessary data files, such as the client list, daily rates, financial cross rates (FCR), etc.
+Clean and initialize the data by preparing the file with previous balances, setting the current date, and clearing any unnecessary or outdated information.
+Data Calculation and Processing:
 
-class Connection:
-    def __init__(self, source_id, target_id):
-        self.source_id = source_id
-        self.target_id = target_id
+Implement calculations that include safeguarding amounts, overdue checks, and unapplied balances. This would involve:
+Calculating and adding necessary values for safeguarding (e.g., client ID and amount).
+Checking for any overdue items and adding them to an unapplied list.
+Data Review and Filtering:
 
-    def __repr__(self):
-        return f"Connection(source_id={self.source_id}, target_id={self.target_id})"
+Review and clean the data by removing outdated information and filtering out irrelevant entries (like dummy banks or unidentified clients).
+Organize data for further processing by adding and checking review items for accuracy.
+Additional Data Imports:
 
-def parse_alteryx_workflow(xml_file):
-    tree = ET.parse(xml_file)
-    root = tree.getroot()
+Import additional files as needed, like the ABP, PPE Client List, and Holding Balance, and perform any specific actions such as calculating the difference between available and current balances for each client.
+Currency and Aggregation:
 
-    tools = []
-    connections = []
+Aggregate balances across different sheets and convert values based on daily exchange rates.
+Apply currency conversions from the base currency to the local currency as needed, using the imported daily rates.
+Output and Finalization:
 
-    # Extract namespace
-    ns = {'x': root.tag.split('}')[0].strip('{')}
-
-    # Debug: Print the root tag and namespace
-    print(f"Root tag: {root.tag}, Namespace: {ns['x']}")
-
-    # Parse tools
-    for tool_element in root.findall('.//x:Tool', ns):
-        tool_id = tool_element.get('ToolID')
-        tool_name = tool_element.get('Name')
-        tool_type = tool_element.get('ToolType')
-        properties = {}
-
-        properties_element = tool_element.find('.//x:Properties', ns)
-        if properties_element is not None:
-            for prop in properties_element:
-                properties[prop.tag.split('}')[1]] = prop.text
-
-        tool = Tool(id=tool_id, name=tool_name, tool_type=tool_type, properties=properties)
-        tools.append(tool)
-
-    # Debug: Print parsed tools
-    print(f"Parsed tools: {tools}")
-
-    # Parse connections
-    for connection_element in root.findall('.//x:Connection', ns):
-        source_id = connection_element.get('SourceToolID')
-        target_id = connection_element.get('TargetToolID')
-        connection = Connection(source_id=source_id, target_id=target_id)
-        connections.append(connection)
-
-    # Debug: Print parsed connections
-    print(f"Parsed connections: {connections}")
-
-    return tools, connections
-
-# Example usage
-xml_file = 'path_to_your_alteryx_workflow.xml'
-tools, connections = parse_alteryx_workflow(xml_file)
-
-print("Tools in the workflow:")
-for tool in tools:
-    print(tool)
-
-print("\nConnections in the workflow:")
-for connection in connections:
-    print(connection)
-
+Once all data has been processed and calculations are complete, export or save the results for further use or reporting. This could involve saving the final data into a new file or updating specific sheets with the processed data.
+This approach ensures that each step in the workflow is clear, modular, and easy to adapt or modify. The entire process focuses on loading, transforming, and aggregating data based on defined business rules.
